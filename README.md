@@ -90,21 +90,3 @@ Change elastic thickness and uplift rate:
 ```bash
 python main_simulation_harmonized.py --Te 40000 --uplift 30
 ```
-
-## GitHub Setup
-
-This folder is the clean repository candidate. To publish it:
-
-```bash
-cd MGM
-git init
-git add .
-git commit -m "Initial MGM model release"
-git branch -M main
-git remote add origin https://github.com/Lounisait/MGM.git
-git push -u origin main
-```
-
-If the GitHub repository already exists under another name, replace the remote
-URL with the exact repository URL.
-
