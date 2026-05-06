@@ -52,6 +52,71 @@ from Topo import (
 )
 
 
+CRATER_PROFILE_PRESETS = {
+    "small": {
+        "label": "700",
+        "aliases": ("petit", "700"),
+        "surface_profile": "data/surf_profile_700.csv",
+        "bouguer_profile": "data/bouguer_700.csv",
+        "limit": 60000.0,
+    },
+    "medium": {
+        "label": "2000",
+        "aliases": ("middle", "milieu", "moyen", "2000"),
+        "surface_profile": "data/surf_profile_2000.csv",
+        "bouguer_profile": "data/bouguer_2000.csv",
+        "limit": 80000.0,
+    },
+    "large": {
+        "label": "5000",
+        "aliases": ("grand", "5000"),
+        "surface_profile": "data/surf_profile_5000.csv",
+        "bouguer_profile": "data/bouguer_5000.csv",
+        "limit": 160000.0,
+    },
+}
+
+CRATER_PROFILE_ALIASES = {
+    alias: key
+    for key, preset in CRATER_PROFILE_PRESETS.items()
+    for alias in (key, *preset["aliases"])
+}
+CRATER_PROFILE_CHOICES = sorted(CRATER_PROFILE_ALIASES)
+
+
+def apply_crater_profile(
+    params,
+    crater_profile=None,
+    surface_profile_path=None,
+    bouguer_profile_path=None,
+    limit_m=None,
+):
+    """Apply a crater preset, then any explicit file or domain overrides."""
+    selected = str(crater_profile or params.get("crater_profile", "medium")).lower()
+    if selected not in CRATER_PROFILE_ALIASES:
+        valid = ", ".join(CRATER_PROFILE_CHOICES)
+        raise ValueError(f"Unknown crater profile '{selected}'. Valid values: {valid}.")
+
+    preset_key = CRATER_PROFILE_ALIASES[selected]
+    preset = CRATER_PROFILE_PRESETS[preset_key]
+    params["crater_profile"] = preset_key
+    params["crater_label"] = preset["label"]
+    params["file_path"] = preset["surface_profile"]
+    params["file_path_grav"] = preset["bouguer_profile"]
+    params["limit"] = float(preset["limit"])
+
+    if surface_profile_path is not None:
+        params["file_path"] = str(surface_profile_path)
+    if bouguer_profile_path is not None:
+        params["file_path_grav"] = str(bouguer_profile_path)
+    if limit_m is not None:
+        params["limit"] = float(limit_m)
+
+    if not np.isfinite(float(params["limit"])) or float(params["limit"]) <= 0.0:
+        raise ValueError("The domain limit must be a strictly positive number.")
+    return params
+
+
 
 
 
@@ -64,10 +129,12 @@ def initialize_simulation():
     
     
     
-    params['file_path'] = "data/surf_profile_2000.csv"
-    params['file_path_grav'] = "data/bouguer_2000.csv"
+    params['crater_profile'] = "medium"
+    params['crater_label'] = CRATER_PROFILE_PRESETS["medium"]["label"]
+    params['file_path'] = CRATER_PROFILE_PRESETS["medium"]["surface_profile"]
+    params['file_path_grav'] = CRATER_PROFILE_PRESETS["medium"]["bouguer_profile"]
     params['xy_space'] = 500  
-    params['limit'] = 60000    
+    params['limit'] = CRATER_PROFILE_PRESETS["medium"]["limit"]    
     params['output_root'] = "outputs"
     params['initial_seed_path'] = None
     params['boundary_mode'] = "all_open"
@@ -189,10 +256,12 @@ def build_run_output_dir(params):
     te_label = format_value_for_path(params["Te"] / 1e3)
     uplift_label = format_value_for_path(params["uplift_rate_m_per_Ma"])
     xy_label = format_value_for_path(params["xy_space"])
+    crater_label = str(params.get("crater_label", params.get("crater_profile", "custom")))
     return (
         f"{params['output_root']}/Te{te_label}km"
         f"_uplift{uplift_label}mMa"
         f"_xy{xy_label}m"
+        f"_crater{crater_label}"
         f"_t{int(params['t'])}"
     )
 
@@ -323,7 +392,11 @@ def compute_drainage_summary(barringer, params):
         "uplift_m_per_Ma": float(params["uplift_rate_m_per_Ma"]),
         "simulation_time_yr": int(params["t"]),
         "xy_space_m": float(params["xy_space"]),
+        "domain_limit_m": float(params.get("limit", 0.0)),
+        "crater_profile": str(params.get("crater_profile", "")),
+        "crater_label": str(params.get("crater_label", "")),
         "surface_profile_path": str(params.get("file_path") or ""),
+        "bouguer_profile_path": str(params.get("file_path_grav") or ""),
         "initial_seed_path": str(params.get("initial_seed_path") or ""),
         "domain_boundaries": str(params.get("boundary_mode", "all_open")),
         "random_seed": None if params.get("random_seed") is None else int(params["random_seed"]),
@@ -2277,7 +2350,10 @@ def main(
     save_topography_maps=None,
     random_seed=None,
     initial_seed_path=None,
+    crater_profile=None,
     surface_profile_path=None,
+    bouguer_profile_path=None,
+    limit_m=None,
     xy_space_m=None,
     output_root=None,
     total_time_yr=None,
@@ -2380,8 +2456,13 @@ def main(
         params['random_seed'] = random_seed
     if initial_seed_path is not None:
         params['initial_seed_path'] = str(initial_seed_path)
-    if surface_profile_path is not None:
-        params['file_path'] = str(surface_profile_path)
+    apply_crater_profile(
+        params,
+        crater_profile=crater_profile,
+        surface_profile_path=surface_profile_path,
+        bouguer_profile_path=bouguer_profile_path,
+        limit_m=limit_m,
+    )
     if stop_on_crater_breach is not None:
         params['stop_on_crater_breach'] = bool(stop_on_crater_breach)
     if crater_radius_m is not None:
@@ -3019,6 +3100,12 @@ if __name__ == "__main__":
                         help="NPZ seed file used to initialize topography, bedrock, and soil.")
     parser.add_argument("--surface-profile", type=str, default=None,
                         help="Radial CSV profile used to generate the initial topography if no seed file is provided.")
+    parser.add_argument("--crater-profile", type=str, choices=CRATER_PROFILE_CHOICES, default=None,
+                        help="Crater preset: small/700 with 60 km limit, medium/2000 with 80 km limit, or large/5000 with 160 km limit.")
+    parser.add_argument("--bouguer-profile", type=str, default=None,
+                        help="Bouguer CSV profile used as the initial gravity background.")
+    parser.add_argument("--limit", type=float, default=None,
+                        help="Half-width of the square model domain in meters.")
     parser.add_argument("--xy-space", type=float, default=None,
                         help="Horizontal grid spacing in meters.")
     parser.add_argument("--output-root", type=str, default=None,
@@ -3073,7 +3160,10 @@ if __name__ == "__main__":
         save_topography_maps=args.save_topography_maps,
         random_seed=args.seed,
         initial_seed_path=args.initial_seed_path,
+        crater_profile=args.crater_profile,
         surface_profile_path=args.surface_profile,
+        bouguer_profile_path=args.bouguer_profile,
+        limit_m=args.limit,
         xy_space_m=args.xy_space,
         output_root=args.output_root,
         total_time_yr=args.total_time,
