@@ -117,6 +117,20 @@ Run with magnetic post-processing disabled:
 python main_simulation_harmonized.py --crater-profile medium --drainage-only
 ```
 
+Use the geomorphic-layer flexural load calculation explicitly:
+
+```bash
+python main_simulation_harmonized.py \
+  --crater-profile medium \
+  --flexure-load-mode geomorphic_layers
+```
+
+`geomorphic_layers` is the default mode. It computes the flexural load from the
+bedrock and soil thickness changes produced by geomorphic processes before the
+regional tectonic uplift increment is applied. The previous total-change
+formulation is still available for comparison with
+`--flexure-load-mode legacy_total`.
+
 Override the preset files or domain limit manually:
 
 ```bash
@@ -140,7 +154,7 @@ python main_simulation_harmonized.py \
 Each run writes to a profile-specific output folder such as:
 
 ```text
-outputs/Te30km_uplift0mMa_xy500m_crater2000_t1200100/
+outputs/Te30km_uplift0mMa_xy500m_crater2000_qsgeomorphic_layers_t1200100/
 ```
 
 When enabled, gravity outputs are written under the run folder in `gravity/`.

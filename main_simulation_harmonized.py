@@ -228,7 +228,8 @@ def initialize_simulation():
     params['rhoc'] = 2800        
     params['rho_s'] = 2480       
     params['rho_b'] = 2680       
-    params['flexure_include_direct_uplift_load'] = True
+    params['flexure_load_mode'] = "geomorphic_layers"
+    params['flexure_include_direct_uplift_load'] = False
     
     params['dt_flex'] = 10000    
     params['nb_step_flex'] = max(1, int(round(params['t'] / params['dt_flex'])))
@@ -257,11 +258,13 @@ def build_run_output_dir(params):
     uplift_label = format_value_for_path(params["uplift_rate_m_per_Ma"])
     xy_label = format_value_for_path(params["xy_space"])
     crater_label = str(params.get("crater_label", params.get("crater_profile", "custom")))
+    load_mode_label = str(params.get("flexure_load_mode", "geomorphic_layers")).lower()
     return (
         f"{params['output_root']}/Te{te_label}km"
         f"_uplift{uplift_label}mMa"
         f"_xy{xy_label}m"
         f"_crater{crater_label}"
+        f"_qs{load_mode_label}"
         f"_t{int(params['t'])}"
     )
 
@@ -395,6 +398,7 @@ def compute_drainage_summary(barringer, params):
         "domain_limit_m": float(params.get("limit", 0.0)),
         "crater_profile": str(params.get("crater_profile", "")),
         "crater_label": str(params.get("crater_label", "")),
+        "flexure_load_mode": str(params.get("flexure_load_mode", "geomorphic_layers")),
         "surface_profile_path": str(params.get("file_path") or ""),
         "bouguer_profile_path": str(params.get("file_path_grav") or ""),
         "initial_seed_path": str(params.get("initial_seed_path") or ""),
@@ -758,9 +762,14 @@ def run_simulation(barringer, components, z, X, Y, params):
         components['expweath'].calc_soil_prod_rate()
         components['ddtd'].run_one_step(dt=params['dt'])
 
-        
-        
-        
+        # Geomorphic state before tectonic uplift: only this mass
+        # redistribution contributes to the geomorphic_layers flexural load.
+        z_bed_post_geom = copy.copy(
+            barringer.at_node["bedrock__elevation"]
+        ).reshape(z.shape)
+        z_soil_post_geom = copy.copy(
+            barringer.at_node["soil__depth"]
+        ).reshape(z.shape)
 
         uplift_increment = params['uplift_rate'] * params['dt']  
         barringer.at_node["bedrock__elevation"][barringer.core_nodes] += uplift_increment
@@ -777,20 +786,24 @@ def run_simulation(barringer, components, z, X, Y, params):
         z_soil = copy.copy(
             barringer.at_node["soil__depth"]
         ).reshape(z.shape)
-        
-        
-        
-        
-        bedrock_delta = z_bed - z_bed_previous
-        soil_delta = z_soil - z_soil_previous
-        if not params.get('flexure_include_direct_uplift_load', True):
-            bedrock_delta = bedrock_delta.copy()
-            bedrock_delta.reshape(-1)[barringer.core_nodes] -= uplift_increment
+        flexure_load_mode = str(params.get("flexure_load_mode", "geomorphic_layers")).lower()
 
-        diff = (
-            params['rho_b'] * bedrock_delta +
-            params['rho_s'] * soil_delta
-        )
+        if flexure_load_mode == "geomorphic_layers":
+            bedrock_geom_delta = z_bed_post_geom - z_bed_previous
+            soil_geom_delta = z_soil_post_geom - z_soil_previous
+            diff = (
+                params['rho_b'] * bedrock_geom_delta +
+                params['rho_s'] * soil_geom_delta
+            )
+        elif flexure_load_mode == "legacy_total":
+            bedrock_delta = z_bed - z_bed_previous
+            soil_delta = z_soil - z_soil_previous
+            diff = (
+                params['rho_b'] * bedrock_delta +
+                params['rho_s'] * soil_delta
+            )
+        else:
+            raise ValueError("flexure_load_mode must be 'legacy_total' or 'geomorphic_layers'.")
 
         qs += calc_load(diff, rho, params['g'], 1)
         
@@ -2367,6 +2380,7 @@ def main(
     event_check_interval_yr=None,
     crater_event_min_area_km2=None,
     flexure_include_direct_uplift_load=None,
+    flexure_load_mode=None,
 ):
     """MGM internal routine."""
     
@@ -2474,7 +2488,16 @@ def main(
     if crater_event_min_area_km2 is not None:
         params['crater_event_min_area_m2'] = float(crater_event_min_area_km2) * 1.0e6
     if flexure_include_direct_uplift_load is not None:
-        params['flexure_include_direct_uplift_load'] = bool(flexure_include_direct_uplift_load)
+        params['flexure_include_direct_uplift_load'] = False
+        if bool(flexure_include_direct_uplift_load):
+            print(
+                "Warning: flexure_include_direct_uplift_load=True is ignored; "
+                "MGM uses geomorphic_layers flexural loading by default."
+            )
+    if flexure_load_mode is not None:
+        params['flexure_load_mode'] = str(flexure_load_mode).lower()
+    if str(params.get('flexure_load_mode', 'geomorphic_layers')).lower() not in {"legacy_total", "geomorphic_layers"}:
+        raise ValueError("flexure_load_mode must be 'legacy_total' or 'geomorphic_layers'.")
 
     if params.get('stop_on_crater_breach', False) and run_magnetics:
         raise ValueError("stop_on_crater_breach=True nécessite run_magnetics=False pour éviter un post-traitement incomplet.")
@@ -2578,7 +2601,8 @@ def main(
     drainage_summary["crater_mask_radius_m"] = float(params.get("crater_mask_radius_m", 0.0))
     drainage_summary["event_check_interval_yr"] = int(params.get("event_check_interval_yr", params["dt"]))
     drainage_summary["crater_event_min_area_m2"] = float(params.get("crater_event_min_area_m2", 0.0))
-    drainage_summary["flexure_include_direct_uplift_load"] = bool(params.get("flexure_include_direct_uplift_load", True))
+    drainage_summary["flexure_load_mode"] = str(params.get("flexure_load_mode", "geomorphic_layers"))
+    drainage_summary["flexure_include_direct_uplift_load"] = bool(params.get("flexure_include_direct_uplift_load", False))
     drainage_summary["crater_event"] = results.get("crater_event", {"detected": False})
     summary_path = save_drainage_summary(drainage_summary, params['figures_root'])
     params["executed_time_yr"] = drainage_summary["executed_time_yr"]
@@ -3132,8 +3156,12 @@ if __name__ == "__main__":
                         help="Event-check interval in years.")
     parser.add_argument("--crater-event-min-area-km2", type=float, default=None,
                         help="Minimum drained area (km^2) required to validate a rim-crossing event.")
+    parser.add_argument("--flexure-load-mode", type=str,
+                        choices=["legacy_total", "geomorphic_layers"],
+                        default=None,
+                        help="Flexural-load calculation mode.")
     parser.add_argument("--no-direct-uplift-flexure-load", action="store_true",
-                        help="Remove the imposed tectonic-uplift component from the flexural load.")
+                        help="Legacy option; geomorphic_layers already excludes direct tectonic uplift loading.")
     args = parser.parse_args()
     main(
         Te=args.Te,
@@ -3177,4 +3205,5 @@ if __name__ == "__main__":
         event_check_interval_yr=args.event_check_interval,
         crater_event_min_area_km2=args.crater_event_min_area_km2,
         flexure_include_direct_uplift_load=(False if args.no_direct_uplift_flexure_load else None),
+        flexure_load_mode=args.flexure_load_mode,
     )
