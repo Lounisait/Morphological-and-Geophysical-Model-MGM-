@@ -772,9 +772,9 @@ def run_simulation(barringer, components, z, X, Y, params):
         ).reshape(z.shape)
 
         uplift_increment = params['uplift_rate'] * params['dt']  
-        barringer.at_node["bedrock__elevation"][barringer.core_nodes] += uplift_increment
+        barringer.at_node["bedrock__elevation"] += uplift_increment
         
-        barringer.at_node["topographic__elevation"][barringer.core_nodes] += uplift_increment
+        barringer.at_node["topographic__elevation"] += uplift_increment
         
         
         
