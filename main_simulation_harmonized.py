@@ -230,6 +230,7 @@ def initialize_simulation():
     params['rho_b'] = 2680       
     params['flexure_load_mode'] = "geomorphic_layers"
     params['flexure_include_direct_uplift_load'] = False
+    params['flexure_margin_km'] = 0.0
     
     params['dt_flex'] = 10000    
     params['nb_step_flex'] = max(1, int(round(params['t'] / params['dt_flex'])))
@@ -821,17 +822,18 @@ def run_simulation(barringer, components, z, X, Y, params):
                 qs, nx, ny, dx, dy,
                 params['E'], params['Te'], params['nu'],
                 params['rhom'], params['rhoc'], params['g'],
-                margin_km=0, crater_radius_km=100
+                margin_km=float(params.get('flexure_margin_km', 0.0)),
+                crater_radius_km=100,
             )
             
-            
-            applied_deflec = np.zeros_like(deflec)
-            applied_deflec.reshape(-1)[barringer.core_nodes] = deflec.reshape(-1)[barringer.core_nodes]
-            z.reshape(-1)[barringer.core_nodes] += applied_deflec.reshape(-1)[barringer.core_nodes]
+            # Flexure is a full-domain mechanical response. Apply only the
+            # increment since the previous solve to avoid double-counting.
+            delta_deflec = deflec - cumulative_flexure
+            z += delta_deflec
 
             _zb = barringer.at_node["bedrock__elevation"]
-            _zb[barringer.core_nodes] += applied_deflec.reshape(-1)[barringer.core_nodes]
-            cumulative_flexure += applied_deflec
+            _zb[:] += delta_deflec.reshape(-1)
+            cumulative_flexure = deflec.copy()
             
             
             qs = np.zeros_like(z)
@@ -2372,6 +2374,7 @@ def main(
     total_time_yr=None,
     time_step_yr=None,
     flexure_time_step_yr=None,
+    flexure_margin_km=None,
     topography_snapshot_times_Ma=None,
     boundary_mode=None,
     stop_on_crater_breach=None,
@@ -2422,6 +2425,10 @@ def main(
         params['dt_flex'] = int(flexure_time_step_yr)
         if params['dt_flex'] <= 0:
             raise ValueError("Le pas de temps de flexure doit être strictement positif.")
+    if flexure_margin_km is not None:
+        params['flexure_margin_km'] = float(flexure_margin_km)
+        if params['flexure_margin_km'] < 0.0:
+            raise ValueError("flexure_margin_km must be non-negative.")
     if topography_snapshot_times_Ma is not None:
         snapshot_times_Ma = np.asarray(topography_snapshot_times_Ma, dtype=float).reshape(-1)
         if snapshot_times_Ma.size == 0:
@@ -2595,6 +2602,7 @@ def main(
     drainage_summary["executed_time_yr"] = int(results.get("executed_time_yr", params["t"]))
     drainage_summary["time_step_yr"] = int(params["dt"])
     drainage_summary["flexure_time_step_yr"] = int(params["dt_flex"])
+    drainage_summary["flexure_margin_km"] = float(params.get("flexure_margin_km", 0.0))
     drainage_summary["stop_reason"] = results.get("stop_reason", "completed")
     drainage_summary["stop_on_crater_breach"] = bool(params.get("stop_on_crater_breach", False))
     drainage_summary["crater_radius_m"] = float(params.get("crater_radius_m", 0.0))
@@ -3140,6 +3148,8 @@ if __name__ == "__main__":
                         help="Numerical time step in years.")
     parser.add_argument("--dt-flex", type=int, default=None,
                         help="Interval between flexure calculations, in years.")
+    parser.add_argument("--flexure-margin-km", type=float, default=None,
+                        help="Spatial margin added around the domain for flexure calculations.")
     parser.add_argument("--topography-snapshot-times-ma", type=float, nargs="+", default=None,
                         help="Exact topography snapshot times to keep/display, in Ma.")
     parser.add_argument("--boundary-mode", type=str,
@@ -3197,6 +3207,7 @@ if __name__ == "__main__":
         total_time_yr=args.total_time,
         time_step_yr=args.dt,
         flexure_time_step_yr=args.dt_flex,
+        flexure_margin_km=args.flexure_margin_km,
         topography_snapshot_times_Ma=args.topography_snapshot_times_ma,
         boundary_mode=args.boundary_mode,
         stop_on_crater_breach=args.stop_on_crater_breach,
