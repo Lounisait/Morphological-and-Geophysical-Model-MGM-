@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """Main entry point for the coupled Morphological and Geophysical Model (MGM)."""
 
+import csv
 import json
 import os
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/mplconfig")
@@ -152,6 +153,7 @@ def initialize_simulation():
     params['save_topography_maps'] = False
     params['topography_snapshot_times_yr'] = None
     params['random_seed'] = 0
+    params['debug_flexure'] = False
     params['stop_on_crater_breach'] = False
     params['crater_radius_m'] = 15000.0
     params['crater_mask_radius_m'] = 15000.0
@@ -231,6 +233,7 @@ def initialize_simulation():
     params['flexure_load_mode'] = "geomorphic_layers"
     params['flexure_include_direct_uplift_load'] = False
     params['flexure_margin_km'] = 0.0
+    params['flexure_outside_fill_mode'] = "zero"
     
     params['dt_flex'] = 10000    
     params['nb_step_flex'] = max(1, int(round(params['t'] / params['dt_flex'])))
@@ -260,12 +263,14 @@ def build_run_output_dir(params):
     xy_label = format_value_for_path(params["xy_space"])
     crater_label = str(params.get("crater_label", params.get("crater_profile", "custom")))
     load_mode_label = str(params.get("flexure_load_mode", "geomorphic_layers")).lower()
+    fill_mode_label = str(params.get("flexure_outside_fill_mode", "zero")).lower()
     return (
         f"{params['output_root']}/Te{te_label}km"
         f"_uplift{uplift_label}mMa"
         f"_xy{xy_label}m"
         f"_crater{crater_label}"
         f"_qs{load_mode_label}"
+        f"_fill{fill_mode_label}"
         f"_t{int(params['t'])}"
     )
 
@@ -496,6 +501,100 @@ def save_drainage_summary(summary, figures_root):
     return summary_path
 
 
+def save_topography_flexure_snapshots(results, X, Y, params, figures_root):
+    """Export topography, soil-depth, and flexure snapshots for later comparison."""
+    os.makedirs(figures_root, exist_ok=True)
+    export_path = os.path.join(figures_root, "topography_flexure_snapshots.npz")
+
+    topo_stack = np.asarray(results.get("TOPO", []), dtype=float)
+    epais_stack = np.asarray(results.get("EPAIS", []), dtype=float)
+    flex_stack = np.asarray(results.get("FLEX", []), dtype=float)
+    snapshot_times_yr = np.asarray(
+        results.get("topography_snapshot_times_yr", params.get("snapshot_times_yr", [])),
+        dtype=float,
+    ).reshape(-1)
+    if snapshot_times_yr.size == 0 and topo_stack.ndim == 3 and topo_stack.shape[0] > 0:
+        snapshot_times_yr = np.linspace(
+            0.0,
+            float(params.get("executed_time_yr", params.get("t", 0))),
+            topo_stack.shape[0],
+        )
+
+    np.savez_compressed(
+        export_path,
+        TOPO=topo_stack,
+        EPAIS=epais_stack,
+        FLEX=flex_stack,
+        X=np.asarray(X, dtype=float),
+        Y=np.asarray(Y, dtype=float),
+        snapshot_times_yr=snapshot_times_yr,
+        snapshot_times_Ma=snapshot_times_yr / 1.0e6,
+        Te_m=np.asarray(float(params.get("Te", np.nan))),
+        uplift_m_per_Ma=np.asarray(float(params.get("uplift_rate_m_per_Ma", np.nan))),
+        xy_space_m=np.asarray(float(params.get("xy_space", np.nan))),
+        total_time_yr=np.asarray(float(params.get("t", np.nan))),
+        executed_time_yr=np.asarray(float(params.get("executed_time_yr", params.get("t", np.nan)))),
+        boundary_mode=np.asarray(str(params.get("boundary_mode", ""))),
+        flexure_load_mode=np.asarray(str(params.get("flexure_load_mode", "geomorphic_layers"))),
+        flexure_outside_fill_mode=np.asarray(str(params.get("flexure_outside_fill_mode", "zero"))),
+        initial_seed_path=np.asarray(str(params.get("initial_seed_path", ""))),
+    )
+    return export_path
+
+
+def _stats_mean_min_max_sum(array):
+    """Return mean, min, max, and sum as plain floats for CSV output."""
+    arr = np.asarray(array, dtype=float)
+    return {
+        "mean": float(np.nanmean(arr)),
+        "min": float(np.nanmin(arr)),
+        "max": float(np.nanmax(arr)),
+        "sum": float(np.nansum(arr)),
+    }
+
+
+def save_flexure_debug_csv(debug_rows, figures_root):
+    """Write flexure-load coupling diagnostics to a CSV file."""
+    if not debug_rows:
+        return None
+
+    os.makedirs(figures_root, exist_ok=True)
+    csv_path = os.path.join(figures_root, "flexure_debug.csv")
+    fieldnames = [
+        "time_yr",
+        "bedrock_delta_mean",
+        "bedrock_delta_min",
+        "bedrock_delta_max",
+        "bedrock_delta_sum",
+        "soil_delta_mean",
+        "soil_delta_min",
+        "soil_delta_max",
+        "soil_delta_sum",
+        "diff_mean",
+        "diff_min",
+        "diff_max",
+        "diff_sum",
+        "qs_mean",
+        "qs_min",
+        "qs_max",
+        "qs_sum",
+        "deflec_mean",
+        "deflec_min",
+        "deflec_max",
+        "cumulative_flexure_mean",
+        "cumulative_flexure_min",
+        "cumulative_flexure_max",
+        "topo_mean",
+        "topo_min",
+        "topo_max",
+    ]
+    with open(csv_path, "w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(debug_rows)
+    return csv_path
+
+
 def load_initial_seed(seed_path):
     """MGM internal routine."""
     with np.load(seed_path, allow_pickle=True) as topo_seed:
@@ -707,6 +806,9 @@ def run_simulation(barringer, components, z, X, Y, params):
     
     qs = np.zeros_like(z)
     rho = np.ones_like(z) * params['rho_s']
+    bedrock_geom_interval = np.zeros_like(z)
+    soil_geom_interval = np.zeros_like(z)
+    diff_interval = np.zeros_like(z)
     
     
     z_bed_previous = copy.copy(
@@ -722,6 +824,7 @@ def run_simulation(barringer, components, z, X, Y, params):
         int(params.get("log_progress_interval_yr", params["dt"])),
     )
     log_progress_steps = max(1, int(round(log_progress_interval_yr / params["dt"])))
+    debug_flexure_rows = []
 
     stop_on_crater_breach = params.get("stop_on_crater_breach", False)
     crater_mask = None
@@ -788,10 +891,10 @@ def run_simulation(barringer, components, z, X, Y, params):
             barringer.at_node["soil__depth"]
         ).reshape(z.shape)
         flexure_load_mode = str(params.get("flexure_load_mode", "geomorphic_layers")).lower()
+        bedrock_geom_delta = z_bed_post_geom - z_bed_previous
+        soil_geom_delta = z_soil_post_geom - z_soil_previous
 
         if flexure_load_mode == "geomorphic_layers":
-            bedrock_geom_delta = z_bed_post_geom - z_bed_previous
-            soil_geom_delta = z_soil_post_geom - z_soil_previous
             diff = (
                 params['rho_b'] * bedrock_geom_delta +
                 params['rho_s'] * soil_geom_delta
@@ -806,13 +909,17 @@ def run_simulation(barringer, components, z, X, Y, params):
         else:
             raise ValueError("flexure_load_mode must be 'legacy_total' or 'geomorphic_layers'.")
 
+        bedrock_geom_interval += bedrock_geom_delta
+        soil_geom_interval += soil_geom_delta
+        diff_interval += diff
         qs += calc_load(diff, rho, params['g'], 1)
         
         
         
         
         
-        if i % params['mod_flex'] == 0:
+        should_solve_flexure = ((i + 1) % params['mod_flex'] == 0) or (i == params['nt'] - 1)
+        if should_solve_flexure:
             
             nx, ny = z.shape
             dx = X[1, 2] - X[2, 1]
@@ -824,6 +931,7 @@ def run_simulation(barringer, components, z, X, Y, params):
                 params['rhom'], params['rhoc'], params['g'],
                 margin_km=float(params.get('flexure_margin_km', 0.0)),
                 crater_radius_km=100,
+                outside_fill_mode=str(params.get('flexure_outside_fill_mode', 'zero')).lower(),
             )
             
             # Flexure is a full-domain mechanical response, so apply it to all nodes.
@@ -832,13 +940,54 @@ def run_simulation(barringer, components, z, X, Y, params):
             _zb = barringer.at_node["bedrock__elevation"]
             _zb[:] += deflec.reshape(-1)
             cumulative_flexure += deflec
+
+            if params.get("debug_flexure", False):
+                bedrock_stats = _stats_mean_min_max_sum(bedrock_geom_interval)
+                soil_stats = _stats_mean_min_max_sum(soil_geom_interval)
+                diff_stats = _stats_mean_min_max_sum(diff_interval)
+                qs_stats = _stats_mean_min_max_sum(qs)
+                deflec_stats = _stats_mean_min_max_sum(deflec)
+                cumulative_stats = _stats_mean_min_max_sum(cumulative_flexure)
+                topo_stats = _stats_mean_min_max_sum(z)
+                debug_flexure_rows.append(
+                    {
+                        "time_yr": int(current_time_yr),
+                        "bedrock_delta_mean": bedrock_stats["mean"],
+                        "bedrock_delta_min": bedrock_stats["min"],
+                        "bedrock_delta_max": bedrock_stats["max"],
+                        "bedrock_delta_sum": bedrock_stats["sum"],
+                        "soil_delta_mean": soil_stats["mean"],
+                        "soil_delta_min": soil_stats["min"],
+                        "soil_delta_max": soil_stats["max"],
+                        "soil_delta_sum": soil_stats["sum"],
+                        "diff_mean": diff_stats["mean"],
+                        "diff_min": diff_stats["min"],
+                        "diff_max": diff_stats["max"],
+                        "diff_sum": diff_stats["sum"],
+                        "qs_mean": qs_stats["mean"],
+                        "qs_min": qs_stats["min"],
+                        "qs_max": qs_stats["max"],
+                        "qs_sum": qs_stats["sum"],
+                        "deflec_mean": deflec_stats["mean"],
+                        "deflec_min": deflec_stats["min"],
+                        "deflec_max": deflec_stats["max"],
+                        "cumulative_flexure_mean": cumulative_stats["mean"],
+                        "cumulative_flexure_min": cumulative_stats["min"],
+                        "cumulative_flexure_max": cumulative_stats["max"],
+                        "topo_mean": topo_stats["mean"],
+                        "topo_min": topo_stats["min"],
+                        "topo_max": topo_stats["max"],
+                    }
+                )
             
             
             qs = np.zeros_like(z)
+            bedrock_geom_interval = np.zeros_like(z)
+            soil_geom_interval = np.zeros_like(z)
+            diff_interval = np.zeros_like(z)
             
             
-            t_simu_previous = i * params['dt']
-            t_simu.append(copy.copy(t_simu_previous))
+            t_simu.append(copy.copy(current_time_yr))
             topo.append(copy.copy(z))
             epais.append(copy.copy(
                 barringer.at_node["soil__depth"].reshape(z.shape)
@@ -929,6 +1078,7 @@ def run_simulation(barringer, components, z, X, Y, params):
         'executed_time_yr': executed_time_yr,
         'stop_reason': stop_reason,
         'crater_event': crater_event,
+        'flexure_debug_rows': debug_flexure_rows,
     }
     
     return results
@@ -2373,6 +2523,8 @@ def main(
     time_step_yr=None,
     flexure_time_step_yr=None,
     flexure_margin_km=None,
+    flexure_outside_fill_mode=None,
+    debug_flexure=None,
     topography_snapshot_times_Ma=None,
     boundary_mode=None,
     stop_on_crater_breach=None,
@@ -2427,6 +2579,10 @@ def main(
         params['flexure_margin_km'] = float(flexure_margin_km)
         if params['flexure_margin_km'] < 0.0:
             raise ValueError("flexure_margin_km must be non-negative.")
+    if flexure_outside_fill_mode is not None:
+        params['flexure_outside_fill_mode'] = str(flexure_outside_fill_mode).lower()
+    if str(params.get('flexure_outside_fill_mode', 'zero')).lower() not in {"zero", "mean", "edge"}:
+        raise ValueError("flexure_outside_fill_mode must be 'zero', 'mean', or 'edge'.")
     if topography_snapshot_times_Ma is not None:
         snapshot_times_Ma = np.asarray(topography_snapshot_times_Ma, dtype=float).reshape(-1)
         if snapshot_times_Ma.size == 0:
@@ -2475,6 +2631,8 @@ def main(
         params['random_seed'] = random_seed
     if initial_seed_path is not None:
         params['initial_seed_path'] = str(initial_seed_path)
+    if debug_flexure is not None:
+        params['debug_flexure'] = bool(debug_flexure)
     apply_crater_profile(
         params,
         crater_profile=crater_profile,
@@ -2601,6 +2759,7 @@ def main(
     drainage_summary["time_step_yr"] = int(params["dt"])
     drainage_summary["flexure_time_step_yr"] = int(params["dt_flex"])
     drainage_summary["flexure_margin_km"] = float(params.get("flexure_margin_km", 0.0))
+    drainage_summary["flexure_outside_fill_mode"] = str(params.get("flexure_outside_fill_mode", "zero"))
     drainage_summary["stop_reason"] = results.get("stop_reason", "completed")
     drainage_summary["stop_on_crater_breach"] = bool(params.get("stop_on_crater_breach", False))
     drainage_summary["crater_radius_m"] = float(params.get("crater_radius_m", 0.0))
@@ -2652,7 +2811,20 @@ def main(
             dpi=params.get("save_dpi", 300),
         )
         print(f"Figure flexure : {flexure_maps_path}")
+        snapshots_export_path = save_topography_flexure_snapshots(
+            results, X, Y, params, params["figures_root"]
+        )
+        print(f"Export topography/flexure snapshots: {snapshots_export_path}")
         print()
+
+    if params.get("debug_flexure", False):
+        flexure_debug_path = save_flexure_debug_csv(
+            results.get("flexure_debug_rows", []),
+            params["figures_root"],
+        )
+        if flexure_debug_path is not None:
+            print(f"Flexure debug: {flexure_debug_path}")
+            print()
 
     gravity_outputs = {}
     if params.get("run_gravity", False):
@@ -3148,6 +3320,10 @@ if __name__ == "__main__":
                         help="Interval between flexure calculations, in years.")
     parser.add_argument("--flexure-margin-km", type=float, default=None,
                         help="Spatial margin added around the domain for flexure calculations.")
+    parser.add_argument("--flexure-outside-fill-mode", type=str, choices=["zero", "mean", "edge"], default=None,
+                        help="Fill strategy for the extended flexure domain.")
+    parser.add_argument("--debug-flexure", action="store_true",
+                        help="Write flexure_debug.csv with load-flexure diagnostics at each solve.")
     parser.add_argument("--topography-snapshot-times-ma", type=float, nargs="+", default=None,
                         help="Exact topography snapshot times to keep/display, in Ma.")
     parser.add_argument("--boundary-mode", type=str,
@@ -3206,6 +3382,8 @@ if __name__ == "__main__":
         time_step_yr=args.dt,
         flexure_time_step_yr=args.dt_flex,
         flexure_margin_km=args.flexure_margin_km,
+        flexure_outside_fill_mode=args.flexure_outside_fill_mode,
+        debug_flexure=args.debug_flexure,
         topography_snapshot_times_Ma=args.topography_snapshot_times_ma,
         boundary_mode=args.boundary_mode,
         stop_on_crater_breach=args.stop_on_crater_breach,

@@ -11,6 +11,7 @@ python "${PROJECT_ROOT}/main_simulation_harmonized.py" \
   --total-time 10100 \
   --dt 100 \
   --dt-flex 1000 \
+  --flexure-outside-fill-mode zero \
   --drainage-only \
   --no-save-figures \
   --no-progress

@@ -53,6 +53,7 @@ python main_simulation_harmonized.py \
   --total-time 10100 \
   --dt 100 \
   --dt-flex 1000 \
+  --flexure-outside-fill-mode zero \
   --drainage-only \
   --no-save-figures \
   --no-progress
@@ -131,6 +132,17 @@ regional tectonic uplift increment is applied. The previous total-change
 formulation is still available for comparison with
 `--flexure-load-mode legacy_total`.
 
+The extended flexure domain can be filled with `zero`, `mean`, or `edge` values:
+
+```bash
+python main_simulation_harmonized.py \
+  --crater-profile medium \
+  --flexure-outside-fill-mode zero
+```
+
+Use `--debug-flexure` to write `flexure_debug.csv`, which stores load,
+deflection, and cumulative-flexure diagnostics at each flexure solve.
+
 Override the preset files or domain limit manually:
 
 ```bash
@@ -154,7 +166,7 @@ python main_simulation_harmonized.py \
 Each run writes to a profile-specific output folder such as:
 
 ```text
-outputs/Te30km_uplift0mMa_xy500m_crater2000_qsgeomorphic_layers_t1200100/
+outputs/Te30km_uplift0mMa_xy500m_crater2000_qsgeomorphic_layers_fillzero_t1200100/
 ```
 
 When enabled, gravity outputs are written under the run folder in `gravity/`.

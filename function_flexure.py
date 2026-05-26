@@ -20,67 +20,76 @@ def calc_load(sed, rho, g, nb):
     
     return qs
 
-def calc_flex_extended(qs, nx, ny, dx, dy, E, Te, nu, rhom, rhoc, g, margin_km, crater_radius_km):
-    """MGM internal routine."""
+def calc_flex_extended(
+    qs,
+    nx,
+    ny,
+    dx,
+    dy,
+    E,
+    Te,
+    nu,
+    rhom,
+    rhoc,
+    g,
+    margin_km,
+    crater_radius_km,
+    outside_fill_mode="zero",
+):
+    """Compute flexural deflection on an extended domain."""
 
     margin_x = int(margin_km * 1000 / dx)
     margin_y = int(margin_km * 1000 / dy)
-    
-     
     crater_radius_nodes = int(crater_radius_km * 1000 / dx)
 
-    
     nx_ext = nx + 2 * margin_x
     ny_ext = ny + 2 * margin_y
-    
+
     if qs.shape != (ny, nx):
         raise ValueError(
-            f"Shape de qs incompatible: attendu {(ny, nx)}, recu {qs.shape}."
+            f"Incompatible qs shape: expected {(ny, nx)}, got {qs.shape}."
         )
 
-    
     qs_ext = np.zeros((ny_ext, nx_ext))
-    qs_ext[margin_y:margin_y+ny, margin_x:margin_x+nx] = qs
-    
-    
+    qs_ext[margin_y:margin_y + ny, margin_x:margin_x + nx] = qs
+
     center_x = nx // 2 + margin_x
     center_y = ny // 2 + margin_y
     crater_mask = np.fromfunction(
         lambda i, j: (i - center_y)**2 + (j - center_x)**2 < crater_radius_nodes**2,
-        (ny_ext, nx_ext)
+        (ny_ext, nx_ext),
     )
 
-    
-    domain_initial_mask = np.zeros_like(qs_ext, dtype=bool)
-    domain_initial_mask[margin_y:margin_y+ny, margin_x:margin_x+nx] = True
-    domain_initial_mask[crater_mask] = False
+    initial_domain_mask = np.zeros_like(qs_ext, dtype=bool)
+    initial_domain_mask[margin_y:margin_y + ny, margin_x:margin_x + nx] = True
+    initial_domain_mask[crater_mask] = False
 
-    
-    qs_mean = np.mean(qs_ext[domain_initial_mask])
+    outside_domain_mask = ~initial_domain_mask
+    outside_domain_mask[margin_y:margin_y + ny, margin_x:margin_x + nx] = False
 
-    
-    outside_domain_mask = ~domain_initial_mask
-    outside_domain_mask[margin_y:margin_y+ny, margin_x:margin_x+nx] = False  
+    if outside_fill_mode == "zero":
+        qs_ext[outside_domain_mask] = 0.0
+    elif outside_fill_mode == "mean":
+        qs_mean = float(np.mean(qs_ext[initial_domain_mask])) if np.any(initial_domain_mask) else 0.0
+        qs_ext[outside_domain_mask] = qs_mean
+    elif outside_fill_mode == "edge":
+        padded = np.pad(qs, ((margin_y, margin_y), (margin_x, margin_x)), mode="edge")
+        qs_ext[outside_domain_mask] = padded[outside_domain_mask]
+    else:
+        raise ValueError("outside_fill_mode must be 'zero', 'mean', or 'edge'.")
 
-    
-    qs_ext[outside_domain_mask] = qs_mean
-    
-    
     D = (E * Te**3) / (12 * (1 - nu**2))
-    alpha_2D = ((D) / ((rhom - rhoc) * g))**(1/4)
-    
-    
+    alpha_2D = (D / ((rhom - rhoc) * g))**(1/4)
+
     bigshape = 2 * ny_ext + 1, 2 * nx_ext + 1
     dist_ny = np.arange(bigshape[0]) - ny_ext
     dist_nx = np.arange(bigshape[1]) - nx_ext
     dist_x, dist_y = np.meshgrid(dist_nx * dx, dist_ny * dy)
-    
-    
+
     bigdist = np.sqrt(dist_x**2 + dist_y**2)
     coef = alpha_2D**2 / (2 * np.pi * D)
     biggrid = coef * sp.kei(bigdist / alpha_2D)
-    
-    
+
     w_total_ext = np.zeros((ny_ext, nx_ext))
     for row_idx, col_idx in zip(*np.nonzero(qs_ext)):
         w_total_ext += (
@@ -92,11 +101,8 @@ def calc_flex_extended(qs, nx, ny, dx, dy, E, Te, nu, rhom, rhoc, g, margin_km, 
                 nx_ext - col_idx : 2 * nx_ext - col_idx,
             ]
         )
-    
-    
-    w_total = w_total_ext[margin_y:margin_y+ny, margin_x:margin_x+nx]
-    
-    return w_total
+
+    return w_total_ext[margin_y:margin_y + ny, margin_x:margin_x + nx]
 
 def calc_flex(qs, nx, ny, dx, dy, E, Te, nu, rhom, rhoc, g):
     """MGM internal routine."""
@@ -142,5 +148,4 @@ def calc_flex(qs, nx, ny, dx, dy, E, Te, nu, rhom, rhoc, g):
                     )
     
     return w_total
-
 
