@@ -826,14 +826,12 @@ def run_simulation(barringer, components, z, X, Y, params):
                 crater_radius_km=100,
             )
             
-            # Flexure is a full-domain mechanical response. Apply only the
-            # increment since the previous solve to avoid double-counting.
-            delta_deflec = deflec - cumulative_flexure
-            z += delta_deflec
+            # Flexure is a full-domain mechanical response, so apply it to all nodes.
+            z += deflec
 
             _zb = barringer.at_node["bedrock__elevation"]
-            _zb[:] += delta_deflec.reshape(-1)
-            cumulative_flexure = deflec.copy()
+            _zb[:] += deflec.reshape(-1)
+            cumulative_flexure += deflec
             
             
             qs = np.zeros_like(z)
