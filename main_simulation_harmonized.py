@@ -405,7 +405,6 @@ def compute_drainage_summary(barringer, params):
         "domain_limit_m": float(params.get("limit", 0.0)),
         "crater_profile": str(params.get("crater_profile", "")),
         "crater_label": str(params.get("crater_label", "")),
-        "flexure_load_mode": str(params.get("flexure_load_mode", "geomorphic_layers")),
         "surface_profile_path": str(params.get("file_path") or ""),
         "bouguer_profile_path": str(params.get("file_path_grav") or ""),
         "initial_seed_path": str(params.get("initial_seed_path") or ""),
@@ -538,6 +537,7 @@ def save_topography_flexure_snapshots(results, X, Y, params, figures_root):
         boundary_mode=np.asarray(str(params.get("boundary_mode", ""))),
         flexure_load_mode=np.asarray(str(params.get("flexure_load_mode", "geomorphic_layers"))),
         flexure_outside_fill_mode=np.asarray(str(params.get("flexure_outside_fill_mode", "zero"))),
+        rho_f_kg_m3=np.asarray(float(params.get("rho_f", np.nan))),
         initial_seed_path=np.asarray(str(params.get("initial_seed_path", ""))),
     )
     return export_path
@@ -891,9 +891,9 @@ def run_simulation(barringer, components, z, X, Y, params):
         z_soil = copy.copy(
             barringer.at_node["soil__depth"]
         ).reshape(z.shape)
-        flexure_load_mode = str(params.get("flexure_load_mode", "geomorphic_layers")).lower()
         bedrock_geom_delta = z_bed_post_geom - z_bed_previous
         soil_geom_delta = z_soil_post_geom - z_soil_previous
+        flexure_load_mode = str(params.get("flexure_load_mode", "geomorphic_layers")).lower()
 
         if flexure_load_mode == "geomorphic_layers":
             diff = (
@@ -2633,12 +2633,12 @@ def main(
         params['log_progress_interval_yr'] = max(int(log_progress_interval_yr), params['dt'])
     if save_topography_maps is not None:
         params['save_topography_maps'] = bool(save_topography_maps)
+    if debug_flexure is not None:
+        params['debug_flexure'] = bool(debug_flexure)
     if random_seed is not None:
         params['random_seed'] = random_seed
     if initial_seed_path is not None:
         params['initial_seed_path'] = str(initial_seed_path)
-    if debug_flexure is not None:
-        params['debug_flexure'] = bool(debug_flexure)
     apply_crater_profile(
         params,
         crater_profile=crater_profile,
