@@ -228,6 +228,7 @@ def initialize_simulation():
     params['nu'] = 0.25          
     params['rhom'] = 3300        
     params['rhoc'] = 2800        
+    params['rho_f'] = 0.0
     params['rho_s'] = 2480       
     params['rho_b'] = 2680       
     params['flexure_load_mode'] = "geomorphic_layers"
@@ -925,10 +926,12 @@ def run_simulation(barringer, components, z, X, Y, params):
             dx = X[1, 2] - X[2, 1]
             dy = Y[2, 1] - Y[1, 2]
             
+            # Wickert convention: the restoring term uses the density of the
+            # material filling the deflection, not the crustal density.
             deflec = calc_flex_extended(
                 qs, nx, ny, dx, dy,
                 params['E'], params['Te'], params['nu'],
-                params['rhom'], params['rhoc'], params['g'],
+                params['rhom'], params['rho_f'], params['g'],
                 margin_km=float(params.get('flexure_margin_km', 0.0)),
                 crater_radius_km=100,
                 outside_fill_mode=str(params.get('flexure_outside_fill_mode', 'zero')).lower(),
@@ -2506,6 +2509,7 @@ def main(
     gravity_grain_density=None,
     gravity_fluid_density=None,
     gravity_add_initial_background=None,
+    flexure_fill_density_kg_m3=None,
     save_figures=None,
     show_figures=None,
     show_progress=None,
@@ -2621,6 +2625,8 @@ def main(
         params['gravity_fluid_density'] = float(gravity_fluid_density)
     if gravity_add_initial_background is not None:
         params['gravity_add_initial_background'] = bool(gravity_add_initial_background)
+    if flexure_fill_density_kg_m3 is not None:
+        params['rho_f'] = float(flexure_fill_density_kg_m3)
     if show_progress is not None:
         params['show_progress'] = bool(show_progress)
     if log_progress_interval_yr is not None:
@@ -2688,6 +2694,10 @@ def main(
         raise ValueError("gravity_grain_density doit être strictement positif.")
     if float(params.get("gravity_fluid_density", 1000.0)) < 0.0:
         raise ValueError("gravity_fluid_density doit être positif ou nul.")
+    if float(params.get("rho_f", 0.0)) < 0.0:
+        raise ValueError("rho_f must be non-negative.")
+    if float(params.get("rhom", 3300.0)) <= float(params.get("rho_f", 0.0)):
+        raise ValueError("rhom must be strictly greater than rho_f for the flexure solver.")
 
     
     params['nb_step_flex'] = max(1, int(round(params['t'] / params['dt_flex'])))
@@ -2760,6 +2770,8 @@ def main(
     drainage_summary["flexure_time_step_yr"] = int(params["dt_flex"])
     drainage_summary["flexure_margin_km"] = float(params.get("flexure_margin_km", 0.0))
     drainage_summary["flexure_outside_fill_mode"] = str(params.get("flexure_outside_fill_mode", "zero"))
+    drainage_summary["flexure_solver_convention"] = "wickert"
+    drainage_summary["flexure_fill_density_kg_m3"] = float(params.get("rho_f", 0.0))
     drainage_summary["stop_reason"] = results.get("stop_reason", "completed")
     drainage_summary["stop_on_crater_breach"] = bool(params.get("stop_on_crater_breach", False))
     drainage_summary["crater_radius_m"] = float(params.get("crater_radius_m", 0.0))
@@ -3286,6 +3298,8 @@ if __name__ == "__main__":
                         help="Pore-fluid density (kg/m^3) for the compaction law.")
     parser.add_argument("--no-initial-gravity-background", action="store_true",
                         help="Do not add the initial Bouguer grid from the input CSV.")
+    parser.add_argument("--rho-f", type=float, default=None,
+                        help="Fill-material density used by the flexure solver with the Wickert convention.")
     parser.add_argument("--no-save-figures", action="store_true",
                         help="Do not write figures to disk.")
     parser.add_argument("--show-figures", action="store_true",
@@ -3365,6 +3379,7 @@ if __name__ == "__main__":
         gravity_grain_density=args.gravity_grain_density,
         gravity_fluid_density=args.gravity_fluid_density,
         gravity_add_initial_background=(False if args.no_initial_gravity_background else None),
+        flexure_fill_density_kg_m3=args.rho_f,
         save_figures=not args.no_save_figures,
         show_figures=args.show_figures,
         show_progress=not args.no_progress,
