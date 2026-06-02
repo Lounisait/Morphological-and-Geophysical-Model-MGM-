@@ -36,7 +36,7 @@ from landlab.components import (
 )
 
 
-from function_flexure import calc_load, calc_flex_extended
+from function_flexure import calc_load, calc_flex_extended, calc_flex_wickert_fd
 from Gravi import compute_gravity_anomalies
 from mag_harmonized import (
     compute_mag_evolution_column_prism,
@@ -231,10 +231,13 @@ def initialize_simulation():
     params['rho_f'] = 0.0
     params['rho_s'] = 2480       
     params['rho_b'] = 2680       
+    params['flexure_solver'] = 'sas'   # 'sas' (Kelvin/Turcotte) | 'fd' (Wickert/finite differences)
+    params['flexure_boundary'] = 'free_slope'  # fd only: free_slope | clamped_edge
     params['flexure_load_mode'] = "geomorphic_layers"
     params['flexure_include_direct_uplift_load'] = False
     params['flexure_margin_km'] = 0.0
-    params['flexure_outside_fill_mode'] = "zero"
+    params['flexure_margin_alpha'] = 0.0  # >0: margin = N*alpha (overrides flexure_margin_km)
+    params['flexure_outside_fill_mode'] = "zero"  # sas only: zero | mean | edge
     
     params['dt_flex'] = 10000    
     params['nb_step_flex'] = max(1, int(round(params['t'] / params['dt_flex'])))
@@ -247,6 +250,50 @@ def initialize_simulation():
     params['figures_root'] = build_run_output_dir(params)
 
     return params
+
+
+FLEXURE_SOLVER_ALIASES = {
+    "sas": "sas", "turcotte": "sas", "kelvin": "sas",
+    "analytic": "sas", "analytical": "sas", "analytique": "sas",
+    "fd": "fd", "wickert": "fd", "gflex": "fd",
+    "finite_difference": "fd", "differences_finies": "fd",
+}
+FLEXURE_SOLVER_CHOICES = ("sas", "fd")
+
+
+def normalize_flexure_solver(value):
+    """Return the canonical flexure solver name ('sas' or 'fd')."""
+    key = str(value).strip().lower()
+    if key not in FLEXURE_SOLVER_ALIASES:
+        valid = ", ".join(sorted(FLEXURE_SOLVER_ALIASES))
+        raise ValueError(f"Invalid flexure_solver: {value!r}. Accepted values: {valid}.")
+    return FLEXURE_SOLVER_ALIASES[key]
+
+
+def flexural_parameter_m(params):
+    """Flexural parameter alpha [m] from the current elastic properties."""
+    E = float(params["E"])
+    Te = float(params["Te"])
+    nu = float(params["nu"])
+    rhom = float(params["rhom"])
+    rho_f = float(params.get("rho_f", 0.0))
+    g = float(params["g"])
+    if rhom <= rho_f:
+        raise ValueError("rhom must be strictly greater than rho_f to compute alpha.")
+    D = (E * Te ** 3) / (12.0 * (1.0 - nu ** 2))
+    return (D / ((rhom - rho_f) * g)) ** 0.25
+
+
+def resolve_flexure_margin_km(params):
+    """Effective flexure margin in km.
+
+    If ``flexure_margin_alpha`` > 0 the margin is a multiple of the flexural
+    parameter alpha (depends on Te); otherwise ``flexure_margin_km`` is used.
+    """
+    n_alpha = float(params.get("flexure_margin_alpha", 0.0) or 0.0)
+    if n_alpha > 0.0:
+        return n_alpha * flexural_parameter_m(params) / 1000.0
+    return float(params.get("flexure_margin_km", 0.0))
 
 
 def format_value_for_path(value, decimals=3):
@@ -264,14 +311,22 @@ def build_run_output_dir(params):
     xy_label = format_value_for_path(params["xy_space"])
     crater_label = str(params.get("crater_label", params.get("crater_profile", "custom")))
     load_mode_label = str(params.get("flexure_load_mode", "geomorphic_layers")).lower()
+    solver_label = normalize_flexure_solver(params.get("flexure_solver", "sas"))
     fill_mode_label = str(params.get("flexure_outside_fill_mode", "zero")).lower()
+    n_alpha = float(params.get("flexure_margin_alpha", 0.0) or 0.0)
+    if n_alpha > 0.0:
+        margin_label = f"marg{format_value_for_path(n_alpha)}a"
+    else:
+        margin_label = f"marg{format_value_for_path(params.get('flexure_margin_km', 0.0))}km"
     return (
         f"{params['output_root']}/Te{te_label}km"
         f"_uplift{uplift_label}mMa"
         f"_xy{xy_label}m"
         f"_crater{crater_label}"
         f"_qs{load_mode_label}"
+        f"_solver{solver_label}"
         f"_fill{fill_mode_label}"
+        f"_{margin_label}"
         f"_t{int(params['t'])}"
     )
 
@@ -536,6 +591,8 @@ def save_topography_flexure_snapshots(results, X, Y, params, figures_root):
         executed_time_yr=np.asarray(float(params.get("executed_time_yr", params.get("t", np.nan)))),
         boundary_mode=np.asarray(str(params.get("boundary_mode", ""))),
         flexure_load_mode=np.asarray(str(params.get("flexure_load_mode", "geomorphic_layers"))),
+        flexure_solver=np.asarray(str(params.get("flexure_solver", "sas"))),
+        flexure_boundary=np.asarray(str(params.get("flexure_boundary", "free_slope"))),
         flexure_outside_fill_mode=np.asarray(str(params.get("flexure_outside_fill_mode", "zero"))),
         rho_f_kg_m3=np.asarray(float(params.get("rho_f", np.nan))),
         initial_seed_path=np.asarray(str(params.get("initial_seed_path", ""))),
@@ -928,14 +985,30 @@ def run_simulation(barringer, components, z, X, Y, params):
             
             # Wickert convention: the restoring term uses the density of the
             # material filling the deflection, not the crustal density.
-            deflec = calc_flex_extended(
-                qs, nx, ny, dx, dy,
-                params['E'], params['Te'], params['nu'],
-                params['rhom'], params['rho_f'], params['g'],
-                margin_km=float(params.get('flexure_margin_km', 0.0)),
-                crater_radius_km=100,
-                outside_fill_mode=str(params.get('flexure_outside_fill_mode', 'zero')).lower(),
-            )
+            flexure_solver = normalize_flexure_solver(params.get('flexure_solver', 'sas'))
+            flex_margin_km = resolve_flexure_margin_km(params)
+
+            if flexure_solver == 'sas':
+                # Analytical Kelvin Green-function solver (Turcotte & Schubert / gFlex SAS).
+                deflec = calc_flex_extended(
+                    qs, nx, ny, dx, dy,
+                    params['E'], params['Te'], params['nu'],
+                    params['rhom'], params['rho_f'], params['g'],
+                    margin_km=flex_margin_km,
+                    crater_radius_km=100,
+                    outside_fill_mode=str(params.get('flexure_outside_fill_mode', 'zero')).lower(),
+                    sign_convention='topographic',
+                )
+            else:
+                # Finite-difference solver (gFlex/Wickert philosophy).
+                deflec = calc_flex_wickert_fd(
+                    qs, dx, dy,
+                    params['E'], params['Te'], params['nu'],
+                    params['rhom'], params['rho_f'], params['g'],
+                    boundary=str(params.get('flexure_boundary', 'free_slope')).lower(),
+                    sign_convention='topographic',
+                    margin_km=flex_margin_km,
+                )
             
             # Flexure is a full-domain mechanical response, so apply it to all nodes.
             z += deflec
@@ -2527,7 +2600,10 @@ def main(
     time_step_yr=None,
     flexure_time_step_yr=None,
     flexure_margin_km=None,
+    flexure_margin_alpha=None,
     flexure_outside_fill_mode=None,
+    flexure_solver=None,
+    flexure_boundary=None,
     debug_flexure=None,
     topography_snapshot_times_Ma=None,
     boundary_mode=None,
@@ -2583,10 +2659,25 @@ def main(
         params['flexure_margin_km'] = float(flexure_margin_km)
         if params['flexure_margin_km'] < 0.0:
             raise ValueError("flexure_margin_km must be non-negative.")
+    if flexure_margin_alpha is not None:
+        params['flexure_margin_alpha'] = float(flexure_margin_alpha)
+    if float(params.get('flexure_margin_alpha', 0.0) or 0.0) < 0.0:
+        raise ValueError("flexure_margin_alpha must be non-negative.")
     if flexure_outside_fill_mode is not None:
         params['flexure_outside_fill_mode'] = str(flexure_outside_fill_mode).lower()
     if str(params.get('flexure_outside_fill_mode', 'zero')).lower() not in {"zero", "mean", "edge"}:
         raise ValueError("flexure_outside_fill_mode must be 'zero', 'mean', or 'edge'.")
+    if flexure_solver is not None:
+        params['flexure_solver'] = normalize_flexure_solver(flexure_solver)
+    params['flexure_solver'] = normalize_flexure_solver(params.get('flexure_solver', 'sas'))
+    if flexure_boundary is not None:
+        params['flexure_boundary'] = str(flexure_boundary).lower()
+    if str(params.get('flexure_boundary', 'free_slope')).lower() not in {
+        "free_slope", "neumann", "clamped_edge", "dirichlet"
+    }:
+        raise ValueError(
+            "flexure_boundary must be 'free_slope'/'neumann' or 'clamped_edge'/'dirichlet'."
+        )
     if topography_snapshot_times_Ma is not None:
         snapshot_times_Ma = np.asarray(topography_snapshot_times_Ma, dtype=float).reshape(-1)
         if snapshot_times_Ma.size == 0:
@@ -2702,6 +2793,16 @@ def main(
     
     params['nb_step_flex'] = max(1, int(round(params['t'] / params['dt_flex'])))
     params['mod_flex'] = max(1, int(round(params['dt_flex'] / params['dt'])))
+
+    # Effective flexure margin (transparency): alpha depends on Te.
+    alpha_km = flexural_parameter_m(params) / 1000.0
+    eff_margin_km = resolve_flexure_margin_km(params)
+    n_alpha_eff = eff_margin_km / alpha_km if alpha_km > 0 else float("nan")
+    print(
+        f"Flexure: solver={normalize_flexure_solver(params.get('flexure_solver', 'sas'))}, "
+        f"alpha={alpha_km:.1f} km, margin={eff_margin_km:.1f} km (~{n_alpha_eff:.1f} alpha)"
+    )
+
     params['figures_root'] = build_run_output_dir(params)
     
     seed_path = params.get("initial_seed_path")
@@ -3332,10 +3433,22 @@ if __name__ == "__main__":
                         help="Numerical time step in years.")
     parser.add_argument("--dt-flex", type=int, default=None,
                         help="Interval between flexure calculations, in years.")
+    parser.add_argument("--flexure-solver", type=str,
+                        choices=["sas", "turcotte", "kelvin", "fd", "wickert", "gflex"],
+                        default=None,
+                        help="Flexure solver: 'sas'/'turcotte'/'kelvin' (analytical Kelvin) "
+                             "or 'fd'/'wickert'/'gflex' (finite differences).")
+    parser.add_argument("--flexure-boundary", type=str,
+                        choices=["free_slope", "clamped_edge"],
+                        default=None,
+                        help="Boundary condition for the 'fd' solver only.")
     parser.add_argument("--flexure-margin-km", type=float, default=None,
-                        help="Spatial margin added around the domain for flexure calculations.")
+                        help="Spatial margin added around the domain for flexure calculations (km).")
+    parser.add_argument("--flexure-margin-alpha", type=float, default=None,
+                        help="Flexure margin expressed in number of flexural parameters alpha "
+                             "(overrides --flexure-margin-km when > 0). Recommended: 2-3.")
     parser.add_argument("--flexure-outside-fill-mode", type=str, choices=["zero", "mean", "edge"], default=None,
-                        help="Fill strategy for the extended flexure domain.")
+                        help="Fill strategy for the extended flexure domain ('sas' solver only).")
     parser.add_argument("--debug-flexure", action="store_true",
                         help="Write flexure_debug.csv with load-flexure diagnostics at each solve.")
     parser.add_argument("--topography-snapshot-times-ma", type=float, nargs="+", default=None,
@@ -3396,7 +3509,10 @@ if __name__ == "__main__":
         total_time_yr=args.total_time,
         time_step_yr=args.dt,
         flexure_time_step_yr=args.dt_flex,
+        flexure_solver=args.flexure_solver,
+        flexure_boundary=args.flexure_boundary,
         flexure_margin_km=args.flexure_margin_km,
+        flexure_margin_alpha=args.flexure_margin_alpha,
         flexure_outside_fill_mode=args.flexure_outside_fill_mode,
         debug_flexure=args.debug_flexure,
         topography_snapshot_times_Ma=args.topography_snapshot_times_ma,
