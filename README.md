@@ -142,7 +142,53 @@ python main_simulation_harmonized.py \
   --rho-f 0
 ```
 
-The extended flexure domain can be filled with `zero`, `mean`, or `edge` values:
+### Choosing the flexure solver
+
+Two interchangeable flexure solvers are available through `--flexure-solver`:
+
+- `sas` (aliases `turcotte`, `kelvin`): analytical solver based on the Kelvin
+  Green function (Turcotte & Schubert / gFlex "Superposition of Analytical
+  Solutions"). Very fast for localized loads, but its cost grows with both the
+  number of loaded nodes and the margin (roughly O(N^2) for a fully loaded
+  domain).
+- `fd` (aliases `wickert`, `gflex`): finite-difference solver that solves the
+  plate equation `D nabla^4 w + (rho_m - rho_f) g w = q` directly on the grid
+  using sparse matrices. It scales much better for dense loads and large grids,
+  and handles finite-plate boundaries natively via `--flexure-boundary`
+  (`free_slope` or `clamped_edge`).
+
+The default is `sas` (historical behaviour). For production runs (dense
+geomorphic load, fine grid, large domain) `fd` is generally recommended. The
+two solvers agree to better than ~0.1 % in the interior when the loaded region
+is surrounded by a buffer of about 3 alpha; they diverge near the boundaries
+and on domains smaller than a few alpha.
+
+```bash
+python main_simulation_harmonized.py \
+  --crater-profile medium \
+  --flexure-solver fd \
+  --flexure-boundary free_slope
+```
+
+### Flexure margin in units of alpha
+
+The flexural parameter `alpha = (D / ((rho_m - rho_f) g))^(1/4)` sets the length
+scale of the flexural response and depends on `Te`. Because the appropriate
+margin depends on `Te`, you can specify it directly as a number of alpha with
+`--flexure-margin-alpha`. It is converted to km automatically and applied to
+both solvers (as a zero-load buffer for `fd`). A value of 2 to 3 alpha is
+recommended; when greater than 0 it overrides `--flexure-margin-km`. The run
+prints the resolved alpha and margin at start-up.
+
+```bash
+python main_simulation_harmonized.py \
+  --crater-profile medium \
+  --flexure-solver fd \
+  --flexure-margin-alpha 3
+```
+
+The extended flexure domain (for the `sas` solver) can be filled with `zero`,
+`mean`, or `edge` values:
 
 ```bash
 python main_simulation_harmonized.py \
@@ -210,8 +256,11 @@ disabled by default unless noted.
 | Option | Unit / values | Meaning |
 | --- | --- | --- |
 | `--flexure-load-mode` | `geomorphic_layers`, `legacy_total` | Controls how the flexural load `qs` is built. `geomorphic_layers` is the default and uses bedrock plus soil changes from geomorphic processes before tectonic uplift. `legacy_total` uses total bedrock and soil change, including direct uplift effects. |
-| `--flexure-margin-km` | km | Adds a margin around the grid for the flexure calculation to reduce boundary effects. Default is `0`. |
-| `--flexure-outside-fill-mode` | `zero`, `mean`, `edge` | Defines how the extended flexure margin is filled: `zero` uses no load outside the original domain, `mean` uses the mean non-crater domain load, and `edge` pads from the nearest domain edge. |
+| `--flexure-solver` | `sas`, `turcotte`, `kelvin`, `fd`, `wickert`, `gflex` | Selects the flexure solver. `sas`/`turcotte`/`kelvin` is the analytical Kelvin Green-function solver (default). `fd`/`wickert`/`gflex` is the finite-difference solver. |
+| `--flexure-boundary` | `free_slope`, `clamped_edge` | Boundary condition for the `fd` solver only. `free_slope` is a zero-gradient edge; `clamped_edge` keeps the default second-derivative stencil. No effect for `sas`. |
+| `--flexure-margin-km` | km | Adds a margin around the grid for the flexure calculation to reduce boundary effects. Applies to both solvers (zero-load buffer for `fd`). Ignored if `--flexure-margin-alpha` > 0. Default is `0`. |
+| `--flexure-margin-alpha` | number of alpha | Flexure margin expressed in flexural parameters alpha (depends on `Te`). When > 0 it overrides `--flexure-margin-km` and is converted to km automatically. Recommended: 2 to 3. |
+| `--flexure-outside-fill-mode` | `zero`, `mean`, `edge` | (`sas` solver only) Defines how the extended flexure margin is filled: `zero` uses no load outside the original domain, `mean` uses the mean non-crater domain load, and `edge` pads from the nearest domain edge. |
 | `--debug-flexure` | flag | Writes `flexure_debug.csv` with load, deflection, cumulative flexure, bedrock, soil, and topography diagnostics at each flexure solve. |
 | `--no-direct-uplift-flexure-load` | flag | Legacy compatibility flag. The current default `geomorphic_layers` formulation already excludes direct tectonic uplift from flexural loading. |
 
@@ -262,8 +311,12 @@ disabled by default unless noted.
 Each run writes to a profile-specific output folder such as:
 
 ```text
-outputs/Te30km_uplift0mMa_xy500m_crater2000_qsgeomorphic_layers_fillzero_t1200100/
+outputs/Te30km_uplift0mMa_xy500m_crater2000_qsgeomorphic_layers_solversas_fillzero_marg0km_t1200100/
 ```
+
+The folder name now records the flexure solver (`solversas` / `solverfd`) and
+the margin (`marg0km`, or `marg3a` when `--flexure-margin-alpha` is used), so
+runs that differ only by solver or margin do not overwrite each other.
 
 When enabled, gravity outputs are written under the run folder in `gravity/`.
 Topography, flexure, magnetic, drainage, and summary products are written in

@@ -5,6 +5,8 @@
 import numpy as np
 import scipy.special as sp
 from scipy.special import kei
+from scipy.sparse import diags, eye, kron
+from scipy.sparse.linalg import spsolve
 import math as mt
 
 def calc_load(sed, rho, g, nb):
@@ -35,8 +37,18 @@ def calc_flex_extended(
     margin_km,
     crater_radius_km,
     outside_fill_mode="zero",
+    sign_convention="topographic",
 ):
-    """Compute flexural deflection on an extended domain."""
+    """Compute flexural deflection on an extended domain.
+
+    Analytical (SAS) solver: Kelvin-function Green function (Turcotte &
+    Schubert / gFlex "Superposition of Analytical Solutions").
+
+    sign_convention : {"topographic", "mathematical"}
+        - "topographic": a positive load gives a negative deflection
+          (subsidence), directly addable to z-up topography (historical behaviour).
+        - "mathematical": raw Green-function sign (opposite).
+    """
 
     margin_x = int(margin_km * 1000 / dx)
     margin_y = int(margin_km * 1000 / dy)
@@ -102,7 +114,132 @@ def calc_flex_extended(
             ]
         )
 
-    return w_total_ext[margin_y:margin_y + ny, margin_x:margin_x + nx]
+    w_total = w_total_ext[margin_y:margin_y + ny, margin_x:margin_x + nx]
+
+    # In the Kelvin convention used here, a positive load already gives a
+    # negative deflection (subsidence) in z-up topographic convention.
+    if str(sign_convention).lower() == "topographic":
+        return w_total
+    if str(sign_convention).lower() == "mathematical":
+        return -w_total
+    raise ValueError("sign_convention must be 'topographic' or 'mathematical'.")
+
+def _laplacian_1d(n, spacing, boundary):
+    """Sparse 1-D Laplacian used by the finite-difference (Wickert) solver."""
+    main = -2.0 * np.ones(n)
+    off = np.ones(n - 1)
+    L = diags([off, main, off], offsets=[-1, 0, 1], shape=(n, n), format="lil")
+
+    boundary = str(boundary).lower()
+    if boundary in {"free_slope", "neumann"}:
+        L[0, 0] = -1.0
+        L[0, 1] = 1.0
+        L[-1, -1] = -1.0
+        L[-1, -2] = 1.0
+    elif boundary in {"clamped_edge", "dirichlet"}:
+        pass
+    else:
+        raise ValueError(
+            "boundary must be 'free_slope'/'neumann' or 'clamped_edge'/'dirichlet'."
+        )
+
+    return L.tocsr() / spacing ** 2
+
+
+def calc_flex_wickert_fd(
+    qs,
+    dx,
+    dy,
+    E,
+    Te,
+    nu,
+    rhom,
+    rho_f,
+    g,
+    boundary="free_slope",
+    sign_convention="topographic",
+    margin_km=0.0,
+):
+    """Finite-difference (sparse) flexure solver, gFlex/Wickert philosophy.
+
+    Solves directly on the grid
+
+        D nabla^4 w + (rho_m - rho_f) g w = q
+
+    instead of convolving with the Kelvin Green function. Not a full gFlex
+    reimplementation, but the same numerical approach.
+
+    Parameters
+    ----------
+    qs : ndarray, shape (ny, nx)
+        Surface load [N/m^2].
+    dx, dy : float
+        Grid spacing [m].
+    E, Te, nu : float
+        Elastic parameters.
+    rhom : float
+        Mantle density [kg/m^3].
+    rho_f : float
+        Density of the material filling the deflection [kg/m^3].
+    g : float
+        Gravity [m/s^2].
+    boundary : {"free_slope", "neumann", "clamped_edge", "dirichlet"}
+        Simplified boundary condition.
+    sign_convention : {"topographic", "mathematical"}
+        - "topographic": positive load -> subsidence (w < 0), addable to z-up topo.
+        - "mathematical": q used as-is on the right-hand side.
+    margin_km : float
+        Width of a zero-load buffer added around the domain before solving,
+        in km. The deflection is then cropped back to the original domain.
+        Pushes the boundary conditions away from the region of interest
+        (FD equivalent of the SAS solver margin).
+
+    Returns
+    -------
+    w : ndarray, shape (ny, nx)
+        Deflection [m] on the original domain.
+    """
+    qs = np.asarray(qs, dtype=float)
+    ny, nx = qs.shape
+
+    if nx < 5 or ny < 5:
+        raise ValueError("Grid must be at least 5 x 5 nodes.")
+    if dx <= 0.0 or dy <= 0.0:
+        raise ValueError("dx and dy must be strictly positive.")
+    if rhom <= rho_f:
+        raise ValueError("rhom must be strictly greater than rho_f.")
+
+    margin_x = int(margin_km * 1000.0 / dx)
+    margin_y = int(margin_km * 1000.0 / dy)
+    if margin_x > 0 or margin_y > 0:
+        qs_solve = np.pad(qs, ((margin_y, margin_y), (margin_x, margin_x)), mode="constant")
+    else:
+        qs_solve = qs
+    ny_s, nx_s = qs_solve.shape
+
+    D = (E * Te ** 3) / (12.0 * (1.0 - nu ** 2))
+    restoring = (rhom - rho_f) * g
+
+    Lx = _laplacian_1d(nx_s, dx, boundary)
+    Ly = _laplacian_1d(ny_s, dy, boundary)
+    Ix = eye(nx_s, format="csr")
+    Iy = eye(ny_s, format="csr")
+
+    L2 = kron(Iy, Lx, format="csr") + kron(Ly, Ix, format="csr")
+    L4 = L2 @ L2
+    A = D * L4 + restoring * eye(nx_s * ny_s, format="csr")
+
+    rhs = qs_solve.reshape(-1)
+    if str(sign_convention).lower() == "topographic":
+        rhs = -rhs
+    elif str(sign_convention).lower() != "mathematical":
+        raise ValueError("sign_convention must be 'topographic' or 'mathematical'.")
+
+    w = spsolve(A, rhs).reshape((ny_s, nx_s))
+
+    if margin_x > 0 or margin_y > 0:
+        w = w[margin_y:margin_y + ny, margin_x:margin_x + nx]
+    return w
 
 def calc_flex(qs, nx, ny, dx, dy, E, Te, nu, rhom, rhoc, g):
     """MGM internal routine."""
