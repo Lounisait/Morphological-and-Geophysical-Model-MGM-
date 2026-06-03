@@ -9,8 +9,12 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/mplconfig")
 os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
 import copy
 import numpy as np
-import matplotlib.pyplot as plt
 import matplotlib as mpl
+# Backend non-interactif par défaut (batch / machine sans display ou Tcl cassé).
+# Surchargable en définissant MPLBACKEND avant le lancement.
+if os.environ.get("MPLBACKEND") is None:
+    mpl.use("Agg")
+import matplotlib.pyplot as plt
 mpl.rcParams["text.usetex"] = False
 from matplotlib import cm
 from matplotlib.colors import Normalize, LightSource
